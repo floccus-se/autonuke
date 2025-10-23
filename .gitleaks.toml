@@ -1,0 +1,58 @@
+# Gitleaks configuration for awsideman
+# This file customizes what secrets and sensitive data Gitleaks will detect
+
+title = "autonuke secrets detection"
+
+# Global settings
+[extend]
+useDefault = true
+
+[[rules]]
+id = "email-addresses"
+description = "Email addresses in code or documentation"
+regex = '''[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'''
+tags = ["email", "pii"]
+entropy = 0
+
+[[rules]]
+id = "real-profile-names"
+description = "Real AWS profile names (not test profiles)"
+regex = '''profile\s*[=:]\s*["']?[a-zA-Z0-9_-]+["']?'''
+tags = ["aws", "profile", "sensitive"]
+entropy = 0
+
+[[rules]]
+id = "real-account-ids"
+description = "Real AWS account IDs (12-digit numbers)"
+regex = '''\b[0-9]{12}\b'''
+tags = ["aws", "account-id", "sensitive"]
+entropy = 0
+
+[[rules]]
+id = "real-arns"
+description = "Real AWS ARNs with account IDs"
+regex = '''arn:aws:[^:]+:[^:]*:[^:]*:[0-9]{12}:'''
+tags = ["aws", "arn", "sensitive"]
+entropy = 0
+
+[[rules]]
+id = "real-instance-ids"
+description = "Real AWS instance IDs"
+regex = '''\bi-[0-9a-f]{17}\b'''
+tags = ["aws", "instance", "sensitive"]
+entropy = 0
+
+[[rules]]
+id = "real-bucket-names"
+description = "Real S3 bucket names"
+regex = '''bucket[=:]\s*["']?[a-z0-9.-]{3,63}["']?'''
+tags = ["aws", "s3", "bucket", "sensitive"]
+entropy = 0
+
+[[rules]]
+id = "aws-secret-access-key"
+description = "AWS Secret Access Key"
+regex = '''(?i)aws(.{0,20})?(?-i)['"][0-9a-zA-Z/+=]{40}['"]'''
+tags = ["aws", "secret", "credentials"]
+entropy = 0
+

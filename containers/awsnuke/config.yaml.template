@@ -1,0 +1,216 @@
+blocklist:
+  __PROTECTED_ACCOUNTS__
+
+bypass-alias-check-accounts:
+  - __ACCOUNT_ID__
+
+regions:
+  - eu-west-1
+  - eu-north-1
+  - us-east-1
+  # update regions according to your needs
+
+accounts:
+  __ACCOUNT_ID__:
+    presets:
+      - common
+      - sso
+      - controltower
+      - nuke
+      - excludebuckets
+      - excludebackupsnapshots
+
+resource-types:
+  includes:
+    # Storage
+    - EFSFileSystem
+    - FSxFileSystem
+    - BackupVault
+    - BackupPlan
+    - BackupRecoveryPoint
+
+    # Databases
+    - RDSDBInstance
+    - RDSDBClusterSnapshot
+    - RDSDBSnapshot
+    - RedshiftCluster
+    - DynamoDBTable
+
+    # Logs and Metrics
+    - CloudWatchLogGroup
+    - CloudWatchMetricStream
+
+    # Machine Learning and Analytics
+    - SageMakerNotebookInstance
+    - SageMakerModel
+    - SageMakerEndpoint
+    - GlueTable
+    - GlueDatabase
+
+    # Data Streaming
+    - KinesisStream
+    - KinesisFirehoseDeliveryStream
+
+    # Secrets and Access Keys
+    - SecretsManagerSecret
+    - IAMUserAccessKey
+    - ACMCertificate
+
+    # Messaging
+    - SQSQueue
+    - SNSSubscription
+    - SNSPlatformApplication
+    - SNSPlatformEndpoint
+    - SNSQueue
+
+    # Networking
+    - VPC
+    - VPCPeeringConnection
+    - Subnet
+    - SecurityGroup
+    - ElasticIPAddress
+
+    # Compute
+    - EC2Instance
+    - EC2Volume
+    - EC2Snapshot
+    - LaunchConfiguration
+    - AutoScalingGroup
+    - LambdaFunction
+    - LambdaAlias
+    - LambdaLayer
+    - ECSCluster
+    - EKSCluster
+
+    # Containers
+    - ECRRepository
+
+    # Monitoring
+    - ConfigRule
+    - ConfigDeliveryChannel
+
+    # Machine Images
+    - EC2Image
+    - AMI
+
+    # Others
+    - CloudFormationStack
+    - CloudFormationStackSet
+
+presets:
+  common:
+    filters:
+      IAMRole:
+        - OrganizationAccountAccessRole
+        - AWSControlTowerExecution
+        - AWSControlTowerAdmin
+
+  excludebuckets:
+    filters:
+      S3Bucket:
+        - type: glob
+          value: "<bucket-prefix-*>"
+
+  # aws-nuke tries to delete backup snapshots using EC2 API which fails.
+  # The snapshots should be deleted through the backup service.
+  # Exclude snapshots that has a aws-backup tag.
+  excludebackupsnapshots:
+    filters:
+      EC2Snapshot:
+        - property: tag:aws-backup
+          value: "yes"
+      EC2Image:
+        - property: tag:aws-backup
+          value: "yes"
+
+  nuke:
+    filters:
+      CloudFormationStack:
+        - type: "contains"
+          value: "nuke"
+      IAMRole:
+        - type: "contains"
+          value: "nuke"
+      IAMRolePolicyAttachment:
+        - type: "contains"
+          value: "nuke"
+      IAMRolePolicy:
+        - type: "contains"
+          value: "nuke"
+  sso:
+    filters:
+      IAMSAMLProvider:
+        - type: "regex"
+          value: "AWSSSO_.*_DO_NOT_DELETE"
+      IAMRole:
+        - type: "glob"
+          value: "AWSReservedSSO_*"
+      IAMRolePolicyAttachment:
+        - type: "glob"
+          value: "AWSReservedSSO_*"
+  controltower:
+    filters:
+      CloudTrailTrail:
+        - type: "contains"
+          value: "aws-controltower"
+      CloudWatchEventsRule:
+        - type: "contains"
+          value: "aws-controltower"
+        - property: "Name"
+          type: glob
+          value: "AWSControlTower*"
+      EC2VPCEndpoint:
+        - type: "contains"
+          value: "aws-controltower"
+      EC2VPC:
+        - type: "contains"
+          value: "aws-controltower"
+      CloudWatchLogsLogGroup:
+        - type: "contains"
+          value: "aws-controltower"
+        - type: "contains"
+          value: "AWSControlTowerBP"
+      CloudWatchEventsTarget:
+        - type: "contains"
+          value: "aws-controltower"
+        - type: "glob"
+          value: "Rule: AWSControlTower*"
+      SNSSubscription:
+        - type: "contains"
+          value: "aws-controltower"
+      SNSTopic:
+        - type: "contains"
+          value: "aws-controltower"
+      EC2Subnet:
+        - type: "contains"
+          value: "aws-controltower"
+      ConfigServiceDeliveryChannel:
+        - type: "contains"
+          value: "aws-controltower"
+      ConfigServiceConfigurationRecorder:
+        - type: "contains"
+          value: "aws-controltower"
+      CloudFormationStack:
+        - type: "contains"
+          value: "AWSControlTower"
+      EC2RouteTable:
+        - type: "contains"
+          value: "aws-controltower"
+      LambdaFunction:
+        - type: "contains"
+          value: "aws-controltower"
+      IAMRole:
+        - type: "contains"
+          value: "aws-controltower"
+        - type: "contains"
+          value: "AWSControlTower"
+      IAMRolePolicyAttachment:
+        - type: "contains"
+          value: "aws-controltower"
+
+
+settings:
+  EC2Instance:
+    DisableDeletionProtection: true
+  RDSInstance:
+    DisableDeletionProtection: true
