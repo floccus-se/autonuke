@@ -1,0 +1,22 @@
+[
+    {
+        "ParameterKey": "ECRRepositoryName",
+        "ParameterValue": "aws-nuke"
+    },
+    {
+        "ParameterKey": "VpcId",
+        "ParameterValue": "vpc-0ab7581ea41a0499b"
+    },
+    {
+        "ParameterKey": "VpcSubnetId",
+        "ParameterValue": "subnet-01f12f03d08ae7a54"
+    },
+    {
+        "ParameterKey": "OrgId",
+        "ParameterValue": "o-bca54q0emf"
+    },
+    {
+        "ParameterKey": "ProtectedAccountsList",
+        "ParameterValue": "235494818372,011403744019"
+    }
+]

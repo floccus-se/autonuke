@@ -1,0 +1,21 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Parameters:
+  AutoNukeHostAccount:
+    Type: String
+    Description: AWS Account ID that will assume this role
+
+Resources:
+  NukeExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: NukeExecutionRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AutoNukeHostAccount}:root"
+            Action: "sts:AssumeRole"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess

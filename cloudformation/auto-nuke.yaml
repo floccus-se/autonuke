@@ -1,0 +1,395 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Parameters:
+  AwsNukeClusterName:
+    Type: String
+    Description: "The name of the ECS cluster that will run the aws-nuke task"
+    Default: aws-nuke-cluster
+  ECRRepositoryName:
+    Type: String
+    Description: "The name of the ECR repository"
+  VpcId:
+    Type: String
+    Description: "VPC that hosts the ECS cluster"
+  VpcSubnetId:
+    Type: String
+    Description: "Subnet to use for the ECS task"
+  OrgId:
+    Type: String
+    Description: "The AWS organization ID"
+  NukeExecutionRoleName:
+    Type: String
+    Default: NukeExecutionRole
+    Description: "The name of the role that is used to execute aws-nuke"
+  ProtectedAccountsList:
+    Type: CommaDelimitedList
+    Description: "Comma-delimited list of protected account IDs"
+  MaxRetries:
+    Type: String
+    Default: 3
+    Description: "The maximum number of retries if AwsNuke fails"
+  NukeMaxJobs:
+    Type: Number
+    Default: 12
+    Description: "Maximum number of concurrent S3 deletion jobs"
+  NukeRefreshThreshold:
+    Type: Number
+    Default: 300
+    Description: "Refresh credentials when less than this many seconds remaining"
+
+Resources:
+  ProtectedAccountsParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: "/autonuke/protected-accounts"
+      Type: String
+      Value: !Join [',', !Ref ProtectedAccountsList]
+      Description: "List of protected accounts that cannot be nuked"
+
+  ECRRepositoryAwsNuke:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Ref ECRRepositoryName
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: "KMS"
+      ImageTagMutability: "IMMUTABLE"
+
+  AutoNukeEcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref AwsNukeClusterName
+      ClusterSettings:
+       - Name: 'containerInsights'
+         Value: 'enabled'
+
+  AutoNukeLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      # checkov:skip=CKV_AWS_158: Ensure that CloudWatch Log Group is encrypted by KMS
+      LogGroupName: /ecs/autonuke
+      RetentionInDays: 7
+
+  AutoNukeSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security group for AwsNuke ECS Task that only allows outbound traffic"
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - CidrIp: "0.0.0.0/0"
+          IpProtocol: "-1"
+          Description: "Allow outbound traffic"
+
+      SecurityGroupIngress: []
+
+  StepFunctionsExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: AccountCleanupExecutionRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                "aws:SourceAccount":
+                  - !Ref AWS::AccountId
+      Policies:
+        - PolicyName: StepFunctionsExecutionPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecs:RunTask
+                  - ecs:StopTask
+                  - ecs:DescribeTasks
+                Resource:
+                  - !Sub "arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:task-definition/autonuke:*"
+                  - !Sub "arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:task/*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/autonuke*"
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/vendedlogs/states/AccountCleanupStateMachine/*"
+              - Effect: Allow
+                Action: "iam:PassRole"
+                Resource:
+                  - !Sub "arn:aws:iam::${AWS::AccountId}:role/NukeEcsTaskRole"
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ProtectedAccountsParameter}*"
+              # EventBridge permissions required for Step Functions managed rules
+              # These actions do not support resource-level permissions per AWS documentation
+              # checkov:skip=CKV_AWS_111: EventBridge actions require wildcard resource permissions
+              - Effect: Allow
+                Action:
+                  - events:PutRule
+                  - events:DeleteRule
+                  - events:PutTargets
+                  - events:RemoveTargets
+                Resource: "*"
+
+  # Task Definition for Fargate aws-nuke
+  AwsNukeTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: "autonuke"
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: "256"
+      Memory: "512"
+      ExecutionRoleArn: !GetAtt NukeEcsTaskRole.Arn
+      TaskRoleArn: !GetAtt NukeEcsTaskRole.Arn
+      ContainerDefinitions:
+        - Name: aws-nuke
+          Image: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ECRRepositoryName}:latest
+          Essential: true
+          EntryPoint: [ "/usr/local/bin/run-nuke.sh" ]
+          Environment:
+            - Name: ACCOUNT_ID
+              Value: ""  # To be passed dynamically via Step Functions
+            - Name: MAX_RETRIES
+              Value: !Ref MaxRetries
+            - Name: MAX_JOBS
+              Value: !Ref NukeMaxJobs
+            - Name: REFRESH_THRESHOLD
+              Value: !Ref NukeRefreshThreshold
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: /ecs/autonuke
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+
+  # IAM Role for Fargate Task
+  NukeEcsTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: NukeEcsTaskRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: "ecs-tasks.amazonaws.com"
+            Action: "sts:AssumeRole"
+
+  NukeEcsTaskExecutionPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: NukeEcsTaskExecutionPolicy
+      Roles:
+        - !Ref NukeEcsTaskRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - ecr:GetAuthorizationToken
+              - ecr:BatchCheckLayerAvailability
+              - ecr:GetDownloadUrlForLayer
+              - ecr:DescribeRepositories
+              - ecr:ListImages
+              - ecr:DescribeImages
+              - ecr:BatchGetImage
+            Resource: "*"
+          - Effect: Allow
+            Action:
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource:
+              - !Sub "${AutoNukeLogGroup.Arn}*"
+          - Effect: Allow
+            Action:
+              - sts:AssumeRole
+            Resource: !Sub "arn:aws:iam::*:role/${NukeExecutionRoleName}"
+            Condition:
+              StringEquals:
+                aws:PrincipalOrgID: !Ref OrgId
+          - Effect: Allow
+            Action:
+              - ssm:GetParameter
+            Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ProtectedAccountsParameter}*"
+
+
+  AutoNukeStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: AccountCleanupStateMachine
+      RoleArn: !GetAtt StepFunctionsExecutionRole.Arn
+      DefinitionString: |-
+        {
+          "Comment": "A workflow to clean-up account resources",
+          "StartAt": "Initialize",
+          "QueryLanguage": "JSONata",
+          "States": {
+            "Initialize": {
+              "Type": "Pass",
+              "Next": "FetchProtectedAccounts",
+              "Assign": {
+                "retry_count": 0,
+                "account_id": "{% $states.input.account_id %}",
+                "current_memory": "512",
+                "current_cpu": "256",
+                "unrecoverable_exit_codes": [1, 125, 126, 127]
+              }
+            },
+            "FetchProtectedAccounts": {
+              "Type": "Task",
+              "Arguments": {
+                  "Name": "${ProtectedAccountsParameterName}"
+              },
+              "Resource": "arn:aws:states:::aws-sdk:ssm:getParameter",
+              "Next": "IsAccountInBlockList",
+              "Assign": {
+                  "protectedAccounts": "{% $states.result.Parameter.Value %}"
+              }
+            },
+            "IsAccountInBlockList": {
+                "Type": "Choice",
+                "Choices": [
+                    {
+                        "Next": "Fail",
+                        "Condition": "{% $accountId in $protectedAccounts.$split(',') %}",
+                        "Assign": {
+                            "customMessage": "{% 'The account ' & $accountId & ' is a protected account and cannot be nuked!' %}"
+                        }
+                    }
+                ],
+                "Default": "RunAwsNuke"
+            },
+            "RunAwsNuke": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::ecs:runTask.sync",
+              "Arguments": {
+                "LaunchType": "FARGATE",
+                "Cluster": "${AwsNukeClusterName}",
+                "TaskDefinition": "${AwsNukeTaskDefinitionArn}",
+                "NetworkConfiguration": {
+                  "AwsvpcConfiguration": {
+                    "Subnets": ["${VpcSubnetId}"],
+                    "SecurityGroups": ["${SecurityGroupId}"],
+                    "AssignPublicIp": "ENABLED"
+                  }
+                },
+                "Overrides": {
+                  "Cpu": "{% $current_cpu %}",
+                  "Memory": "{% $current_memory %}",
+                  "ContainerOverrides": [
+                    {
+                      "Name": "aws-nuke",
+                      "Environment": [
+                        {
+                          "Name": "ACCOUNT_ID",
+                          "Value": "{% $account_id %}"
+                        },
+                        {
+                          "Name": "NUKE_ROLE_NAME",
+                          "Value": "${NukeExecutionRoleName}"
+                        },
+                        {
+                          "Name": "IS_FINAL_ATTEMPT",
+                          "Value": "{% $retry_count >= ${MaxRetries} ? 'true' : 'false' %}"
+                        },
+                        {
+                          "Name": "TEST_MODE",
+                          "Value": "{% $states.input.test_mode ? $states.input.test_mode : '' %}"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              },
+              "Next": "Success",
+              "Catch": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "Comment": "Catch All Errors",
+                  "Next": "RetryLogic"
+                }
+              ],
+              "TimeoutSeconds": 36000
+            },
+            "RetryLogic": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Next": "Fail",
+                  "Condition": "{% $retry_count >= ${MaxRetries} %}"
+                }
+              ],
+              "Default": "CheckErrorCode",
+              "Assign": {
+                "retry_count": "{% $retry_count + 1 %}",
+                "exit_code": "{% $parse($states.input.Cause).Containers[0].ExitCode %}",
+                "error_reason": "{% $states.input.Error %}"
+              }
+            },
+            "CheckErrorCode": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Next": "Fail",
+                  "Condition": "{% $exit_code in $unrecoverable_exit_codes %}"
+                },
+                {
+                  "Next": "ScaleResources",
+                  "Condition": "{% $exit_code = 137 %}"
+                }
+              ],
+              "Default": "RunAwsNuke"
+            },
+            "ScaleResources": {
+              "Type": "Pass",
+              "Next": "RunAwsNuke",
+              "Assign": {
+                "retry_count": "{% $retry_count %}",
+                "account_id": "{% $account_id %}",
+                "current_memory": "{% $string($number($current_memory) * 2) %}",
+                "current_cpu": "{% $string($number($current_cpu) * 2) %}"
+              }
+            },
+            "Fail": {
+              "Type": "Fail",
+              "Cause": "{% $customMessage ? $customMessage : ('Max retries exceeded. Exit code: ' & $exit_code) %}",
+              "Error": "{% $error_reason ? $error_reason : 'AwsNukeExecutionFailed' %}"
+            },
+            "Success": {
+              "Type": "Pass",
+              "End": true
+            }
+          }
+        }
+      DefinitionSubstitutions:
+        AwsNukeTaskDefinitionArn: !Ref AwsNukeTaskDefinition
+        AwsNukeClusterName: !Ref AutoNukeEcsCluster
+        VpcSubnetId: !Ref VpcSubnetId
+        SecurityGroupId: !Ref AutoNukeSecurityGroup
+        Region: !Ref "AWS::Region"
+        MaxRetries: !Ref MaxRetries
+        NukeExecutionRoleName: !Ref NukeExecutionRoleName
+        ProtectedAccountsParameterName: !Ref ProtectedAccountsParameter
+
+Outputs:
+  ECRRepository:
+    Description: URI of the created ECR repository
+    Value: !GetAtt ECRRepositoryAwsNuke.RepositoryUri
+    Export:
+      Name: ECRRepository
+  AutoNukeStateMachine:
+      Description: "The ARN of the state machine that can submit an ECS task"
+      Value: !Ref AutoNukeStateMachine
+      Export:
+        Name: AutoNukeStateMachineArn
