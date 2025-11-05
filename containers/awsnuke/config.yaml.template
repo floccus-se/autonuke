@@ -1,5 +1,5 @@
 blocklist:
-  __PROTECTED_ACCOUNTS__
+  __BLOCKLISTED_ACCOUNTS__
 
 bypass-alias-check-accounts:
   - __ACCOUNT_ID__

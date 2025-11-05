@@ -149,7 +149,7 @@ The system follows a multi-stage workflow designed for reliability and safety:
 
 **1. Protected Accounts List**
 - Maintains a comma-separated list of account IDs that should never be cleaned
-- Stored in SSM Parameter Store (`/autonuke/protected-accounts`)
+- Stored in SSM Parameter Store (`/autonuke/blocklist`)
 - Checked at the beginning of every execution before any resources are touched
 - Execution fails immediately if target account is protected
 
@@ -293,7 +293,7 @@ First, customize the parameters file `cloudformation/parameters/values-autonuke.
         "ParameterValue": "o-xxxxxxxxxx"
     },
     {
-        "ParameterKey": "ProtectedAccountsList",
+        "ParameterKey": "AccountBlocklist",
         "ParameterValue": "111111111111,222222222222"
     }
 ]
@@ -357,11 +357,11 @@ docker buildx build --provenance=false --platform linux/arm64,linux/amd64 \
 
 ### 3) Configure Protected Accounts
 
-The CloudFormation stack automatically creates the SSM parameter with the accounts specified in `ProtectedAccountsList`. You can update it later via AWS CLI:
+The CloudFormation stack automatically creates the SSM parameter with the accounts specified in `AccountBlocklist`. You can update it later via AWS CLI:
 
 ```bash
 aws ssm put-parameter \
-  --name "/autonuke/protected-accounts" \
+  --name "/autonuke/blocklist" \
   --value "111111111111,222222222222,333333333333" \
   --type "String" \
   --overwrite
@@ -407,7 +407,7 @@ The `containers/awsnuke/config.yaml.template` defines regions, resource types, a
 
 ```yaml
 blocklist:
-  __PROTECTED_ACCOUNTS__
+  __BLOCKLISTED_ACCOUNTS__
 
 bypass-alias-check-accounts:
   - __ACCOUNT_ID__

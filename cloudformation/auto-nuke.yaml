@@ -7,23 +7,23 @@ Parameters:
     Default: aws-nuke-cluster
   ECRRepositoryName:
     Type: String
-    Description: "The name of the ECR repository"
+    Description: "The name of the ECR repository that contains the aws-nuke container image"
   VpcId:
     Type: String
-    Description: "VPC that hosts the ECS cluster"
+    Description: "VPC that hosts the ECS cluster that will run the aws-nuke task"
   VpcSubnetId:
     Type: String
-    Description: "Subnet to use for the ECS task"
+    Description: "Subnet to use for the ECS task that will run the aws-nuke task"
   OrgId:
     Type: String
-    Description: "The AWS organization ID"
+    Description: "AWS organization ID used for securing IAM policies"
   NukeExecutionRoleName:
     Type: String
     Default: NukeExecutionRole
-    Description: "The name of the role that is used to execute aws-nuke"
-  ProtectedAccountsList:
+    Description: "The name of the role that is used to execute aws-nuke. This role is assumed by the aws-nuke task."
+  AccountBlocklist:
     Type: CommaDelimitedList
-    Description: "Comma-delimited list of protected account IDs"
+    Description: "Comma-delimited list of protected account IDs that cannot be nuked"
   MaxRetries:
     Type: String
     Default: 3
@@ -36,14 +36,18 @@ Parameters:
     Type: Number
     Default: 300
     Description: "Refresh credentials when less than this many seconds remaining"
+  AwsRegions:
+    Type: CommaDelimitedList
+    Default: "eu-north-1,eu-west-1"
+    Description: "Comma-delimited list of AWS regions to process during cleanup"
 
 Resources:
-  ProtectedAccountsParameter:
+  AccountBlocklistParameter:
     Type: AWS::SSM::Parameter
     Properties:
-      Name: "/autonuke/protected-accounts"
+      Name: "/autonuke/blocklist"
       Type: String
-      Value: !Join [',', !Ref ProtectedAccountsList]
+      Value: !Join [',', !Ref AccountBlocklist]
       Description: "List of protected accounts that cannot be nuked"
 
   ECRRepositoryAwsNuke:
@@ -126,7 +130,7 @@ Resources:
               - Effect: Allow
                 Action:
                   - ssm:GetParameter
-                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ProtectedAccountsParameter}*"
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${AccountBlocklistParameter}*"
               # EventBridge permissions required for Step Functions managed rules
               # These actions do not support resource-level permissions per AWS documentation
               # checkov:skip=CKV_AWS_111: EventBridge actions require wildcard resource permissions
@@ -164,6 +168,8 @@ Resources:
               Value: !Ref NukeMaxJobs
             - Name: REFRESH_THRESHOLD
               Value: !Ref NukeRefreshThreshold
+            - Name: REGIONS
+              Value: !Join [',', !Ref AwsRegions]
           LogConfiguration:
             LogDriver: awslogs
             Options:
@@ -219,7 +225,7 @@ Resources:
           - Effect: Allow
             Action:
               - ssm:GetParameter
-            Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ProtectedAccountsParameter}*"
+            Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${AccountBlocklistParameter}*"
 
 
   AutoNukeStateMachine:
@@ -235,7 +241,7 @@ Resources:
           "States": {
             "Initialize": {
               "Type": "Pass",
-              "Next": "FetchProtectedAccounts",
+              "Next": "FetchAccountBlocklist",
               "Assign": {
                 "retry_count": 0,
                 "account_id": "{% $states.input.account_id %}",
@@ -244,15 +250,15 @@ Resources:
                 "unrecoverable_exit_codes": [1, 125, 126, 127]
               }
             },
-            "FetchProtectedAccounts": {
+            "FetchAccountBlocklist": {
               "Type": "Task",
               "Arguments": {
-                  "Name": "${ProtectedAccountsParameterName}"
+                  "Name": "${AccountBlocklistParameterName}"
               },
               "Resource": "arn:aws:states:::aws-sdk:ssm:getParameter",
               "Next": "IsAccountInBlockList",
               "Assign": {
-                  "protectedAccounts": "{% $states.result.Parameter.Value %}"
+                  "blocklist": "{% $states.result.Parameter.Value %}"
               }
             },
             "IsAccountInBlockList": {
@@ -260,7 +266,7 @@ Resources:
                 "Choices": [
                     {
                         "Next": "Fail",
-                        "Condition": "{% $accountId in $protectedAccounts.$split(',') %}",
+                        "Condition": "{% $accountId in $blocklist.$split(',') %}",
                         "Assign": {
                             "customMessage": "{% 'The account ' & $accountId & ' is a protected account and cannot be nuked!' %}"
                         }
@@ -380,7 +386,7 @@ Resources:
         Region: !Ref "AWS::Region"
         MaxRetries: !Ref MaxRetries
         NukeExecutionRoleName: !Ref NukeExecutionRoleName
-        ProtectedAccountsParameterName: !Ref ProtectedAccountsParameter
+        AccountBlocklistParameterName: !Ref AccountBlocklistParameter
 
 Outputs:
   ECRRepository:

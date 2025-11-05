@@ -8,6 +8,16 @@ export AWS_CLI_AUTO_PROMPT=off
 MAX_JOBS=${MAX_JOBS:-12}
 REFRESH_THRESHOLD=${REFRESH_THRESHOLD:-300}
 
+# Parse REGIONS from comma-delimited environment variable
+# Default to eu-north-1 and eu-west-1 if not provided
+if [ -z "$REGIONS" ]; then
+  REGIONS=("eu-north-1" "eu-west-1")
+else
+  IFS=',' read -ra REGIONS <<< "$REGIONS"
+fi
+
+echo "Using regions: ${REGIONS[*]}"
+
 # Check if ACCOUNT_ID is provided
 if [ -z "$ACCOUNT_ID" ]; then
   echo "Error: ACCOUNT_ID environment variable is not set."
@@ -165,8 +175,8 @@ export ORIGINAL_AWS_SESSION_TOKEN=$AWS_SESSION_TOKEN
 
 
 # Fetch the list of protected accounts from the SSM Parameter Store
-SSM_PARAM_NAME="/autonuke/protected-accounts"
-ACCOUNT_LIST=$(aws ssm get-parameter --name "$SSM_PARAM_NAME" --query "Parameter.Value" --output text 2>/dev/null)
+SSM_PARAM_NAME="/autonuke/blocklist"
+ACCOUNT_BLOCKLIST=$(aws ssm get-parameter --name "$SSM_PARAM_NAME" --query "Parameter.Value" --output text 2>/dev/null)
 if [ $? -ne 0 ]; then
   echo "SSM parameter '$SSM_PARAM_NAME' not found. Exiting."
   whoAmI=$(aws sts get-caller-identity)
@@ -175,16 +185,16 @@ if [ $? -ne 0 ]; then
   exit 1
 fi
 
-echo "Protected accounts: $ACCOUNT_LIST"
+echo "Protected accounts: $ACCOUNT_BLOCKLIST"
 
-if [ -z "$ACCOUNT_LIST" ]; then
+if [ -z "$ACCOUNT_BLOCKLIST" ]; then
   echo "Account list is empty. You need to configure the parameter $SSM_PARAM_NAME with at least one account ID."
   exit 1
 fi
 
 # Check if the target account ID can be targeted for clean-up
-if echo "$ACCOUNT_LIST" | grep -qw "$ACCOUNT_ID"; then
-  echo "Account $ACCOUNT_ID is protected. Exiting."
+if echo "$ACCOUNT_BLOCKLIST" | grep -qw "$ACCOUNT_ID"; then
+  echo "Account $ACCOUNT_ID is protected and cannot be nuked. Exiting."
   exit 0
 fi
 
@@ -215,10 +225,10 @@ echo "All buckets have been processed."
 sed "s/__ACCOUNT_ID__/${ACCOUNT_ID}/g" /root/config.yaml.template > /tmp/nuke.yaml
 
 # Convert the account list into the required blocklist format
-BLOCKLIST=$(printf "  - %s\n" $(echo "$ACCOUNT_LIST" | tr ',' ' '))
+BLOCKLIST=$(printf "  - %s\n" $(echo "$ACCOUNT_BLOCKLIST" | tr ',' ' '))
 
 # Use a temporary marker to avoid escaping issues
-MARKER="__PROTECTED_ACCOUNTS__"
+MARKER="__BLOCKLISTED_ACCOUNTS__"
 
 # Replace the marker in the config template with the blocklist
 sed "/$MARKER/r /dev/stdin" /tmp/nuke.yaml <<< "$BLOCKLIST" | sed "/$MARKER/d" > /tmp/nuke-config.yaml
@@ -227,8 +237,6 @@ IS_FINAL_ATTEMPT="false"
 
 # Disable deletion protection for DynamoDB tables. aws-nuke cannot handle this natively.
 # Recovery points for backup vaults also cause issues. Delete them before invoking aws-nuke.
-REGIONS=("eu-west-1" "eu-central-1")
-
 for REGION in "${REGIONS[@]}"; do
   echo "=== Processing region: $REGION ==="
   # --- Disable DynamoDB table deletion protection ---

@@ -1,4 +1,4 @@
-# AWS Account Cleanup Infrastructure
+# AutoNuke: Automated AWS Account Cleanup
 
 This repository contains infrastructure and automation for safely cleaning up AWS accounts using aws-nuke. The solution uses AWS Step Functions, ECS Fargate, and a containerized aws-nuke tool to systematically remove resources from target accounts while protecting critical infrastructure.
 
@@ -33,7 +33,7 @@ The solution consists of several key components working together:
 
 ### Security Features
 
-- **Protected Account List**: Maintained in SSM Parameter Store (`/aws-nuke/protected-accounts`)
+- **Protected Accounts**: A list of accounts that should never be nuked. This feature can be configured using the SSM parameter (`/aws-nuke/blocklist`).
 - **Cross-Account Role Assumption**: Uses organization-based trust policies
 - **Resource Filtering**: Comprehensive filters to protect critical AWS services
 - **Network Isolation**: ECS tasks run in private subnets with restricted security groups
@@ -76,8 +76,12 @@ The infrastructure is deployed using CloudFormation with the following parameter
 - `VpcId`: VPC ID for the ECS cluster
 - `VpcSubnetId`: Subnet ID for ECS tasks
 - `OrgId`: AWS Organization ID for cross-account access
+- `AccountBlocklist`: Comma-delimited list of protected account IDs that cannot be nuked
 - `MaxRetries`: Maximum retry attempts (default: 3)
-- `NukeExecutionRoleName`: Role name for aws-nuke execution (default: AwsNukeExecutionRole)
+- `NukeExecutionRoleName`: Role name for aws-nuke execution (default: NukeExecutionRole)
+- `AwsRegions`: Comma-delimited list of AWS regions to process (default: eu-north-1,eu-west-1)
+- `NukeMaxJobs`: Maximum number of concurrent S3 deletion jobs (default: 12)
+- `NukeRefreshThreshold`: Refresh credentials when less than this many seconds remaining (default: 300)
 
 ### aws-nuke Configuration
 
@@ -85,8 +89,10 @@ The container includes a comprehensive configuration template (`config.yaml.temp
 
 - **Presets**: Common, SSO, Control Tower, and custom filters
 - **Resource Types**: 30+ AWS resource types for cleanup
-- **Regions**: Configurable region list (default: eu-west-1, eu-north-1, us-east-1)
+- **Regions**: Dynamically configured via the `AwsRegions` CloudFormation parameter and passed as an environment variable to the container
 - **Protection Rules**: Excludes critical AWS services and infrastructure
+
+The regions are automatically populated in the aws-nuke configuration at runtime based on the `REGIONS` environment variable, which is set from the CloudFormation parameter.
 
 ## Deployment Instructions
 
