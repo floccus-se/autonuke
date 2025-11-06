@@ -8,13 +8,14 @@ export AWS_CLI_AUTO_PROMPT=off
 MAX_JOBS=${MAX_JOBS:-12}
 REFRESH_THRESHOLD=${REFRESH_THRESHOLD:-300}
 
-# Parse REGIONS from comma-delimited environment variable
-# Default to eu-north-1 and eu-west-1 if not provided
+# Check if REGIONS is provided
 if [ -z "$REGIONS" ]; then
-  REGIONS=("eu-north-1" "eu-west-1")
-else
-  IFS=',' read -ra REGIONS <<< "$REGIONS"
+  echo "Error: REGIONS environment variable is not set."
+  exit 1
 fi
+
+# Parse REGIONS from comma-delimited environment variable
+IFS=',' read -ra REGIONS <<< "$REGIONS"
 
 echo "Using regions: ${REGIONS[*]}"
 
@@ -232,6 +233,12 @@ MARKER="__BLOCKLISTED_ACCOUNTS__"
 
 # Replace the marker in the config template with the blocklist
 sed "/$MARKER/r /dev/stdin" /tmp/nuke.yaml <<< "$BLOCKLIST" | sed "/$MARKER/d" > /tmp/nuke-config.yaml
+
+# Inject regions into the config from the REGIONS env var
+REGION_MARKER="__REGIONS__"
+REGION_LIST=$(printf "  - %s\n" "${REGIONS[@]}")
+echo "Regions: $REGION_LIST"
+sed "/$REGION_MARKER/r /dev/stdin" /tmp/nuke-config.yaml <<< "$REGION_LIST" | sed "/$REGION_MARKER/d" > /tmp/nuke-config.yaml.tmp && mv /tmp/nuke-config.yaml.tmp /tmp/nuke-config.yaml
 
 IS_FINAL_ATTEMPT="false"
 

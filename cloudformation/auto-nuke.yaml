@@ -175,7 +175,7 @@ Resources:
             Options:
               awslogs-group: /ecs/autonuke
               awslogs-region: !Ref AWS::Region
-              awslogs-stream-prefix: ecs
+              awslogs-stream-prefix: container
 
   # IAM Role for Fargate Task
   NukeEcsTaskRole:
@@ -211,6 +211,7 @@ Resources:
             Resource: "*"
           - Effect: Allow
             Action:
+              - logs:DescribeLogGroups
               - logs:CreateLogStream
               - logs:PutLogEvents
             Resource:
