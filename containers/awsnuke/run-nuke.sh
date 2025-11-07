@@ -34,23 +34,12 @@ fi
 ROLE_ARN="arn:aws:iam::$ACCOUNT_ID:role/$NUKE_ROLE_NAME"
 SESSION_NAME="AwsNukeSession"
 
-# Test mode for simulating different error types
-if [ "$TEST_MODE" = "oom" ]; then
-  echo "TEST MODE: Simulating OutOfMemoryError"
-  echo "OutOfMemoryError: Container killed due to memory limit" >&2
-  exit 137  # Exit code 137 typically indicates OOM kill
-elif [ "$TEST_MODE" = "unrecoverable" ]; then
-  echo "TEST MODE: Simulating ResourceInitializationError"
-  echo "ResourceInitializationError: Cannot pull container image" >&2
-  exit 1
-fi
-
 # Restore the original execution role session
 restore_execution_role() {
   echo "Restoring original execution role session..."
-  export AWS_ACCESS_KEY_ID=$ORIGINAL_AWS_ACCESS_KEY_ID
-  export AWS_SECRET_ACCESS_KEY=$ORIGINAL_AWS_SECRET_ACCESS_KEY
-  export AWS_SESSION_TOKEN=$ORIGINAL_AWS_SESSION_TOKEN
+  export AWS_ACCESS_KEY_ID=$ECS_AWS_ACCESS_KEY_ID
+  export AWS_SECRET_ACCESS_KEY=$ECS_AWS_SECRET_ACCESS_KEY
+  export AWS_SESSION_TOKEN=$ECS_AWS_SESSION_TOKEN
   echo "Original execution role credentials restored."
 }
 
@@ -170,10 +159,9 @@ delete_bucket() {
 ############################## START ################################
 
 # Store the execution role credentials to be used later by aws-nuke
-export ORIGINAL_AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
-export ORIGINAL_AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
-export ORIGINAL_AWS_SESSION_TOKEN=$AWS_SESSION_TOKEN
-
+export ECS_AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+export ECS_AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+export ECS_AWS_SESSION_TOKEN=$AWS_SESSION_TOKEN
 
 # Fetch the list of protected accounts from the SSM Parameter Store
 SSM_PARAM_NAME="/autonuke/blocklist"
@@ -186,7 +174,7 @@ if [ $? -ne 0 ]; then
   exit 1
 fi
 
-echo "Protected accounts: $ACCOUNT_BLOCKLIST"
+echo "Fetched account blocklist: $ACCOUNT_BLOCKLIST"
 
 if [ -z "$ACCOUNT_BLOCKLIST" ]; then
   echo "Account list is empty. You need to configure the parameter $SSM_PARAM_NAME with at least one account ID."
@@ -202,7 +190,8 @@ fi
 # Assume role in the target account
 assume_role
 
-# S3 pre-nuke cleanup
+###### Start pre-nuke cleanup ######
+
 # aws-nuke cannot handle S3 object deletions efficiently. It takes a long time and occasionally times out for large buckets.
 # S3 buckets are deleted by this script recursively, using high batch size and multiple threads.
 
@@ -220,27 +209,6 @@ done < <(aws s3 ls | cut -d" " -f 3)
 
 wait
 echo "All buckets have been processed."
-
-
-# Generate the aws-nuke configuration file
-sed "s/__ACCOUNT_ID__/${ACCOUNT_ID}/g" /root/config.yaml.template > /tmp/nuke.yaml
-
-# Convert the account list into the required blocklist format
-BLOCKLIST=$(printf "  - %s\n" $(echo "$ACCOUNT_BLOCKLIST" | tr ',' ' '))
-
-# Use a temporary marker to avoid escaping issues
-MARKER="__BLOCKLISTED_ACCOUNTS__"
-
-# Replace the marker in the config template with the blocklist
-sed "/$MARKER/r /dev/stdin" /tmp/nuke.yaml <<< "$BLOCKLIST" | sed "/$MARKER/d" > /tmp/nuke-config.yaml
-
-# Inject regions into the config from the REGIONS env var
-REGION_MARKER="__REGIONS__"
-REGION_LIST=$(printf "  - %s\n" "${REGIONS[@]}")
-echo "Regions: $REGION_LIST"
-sed "/$REGION_MARKER/r /dev/stdin" /tmp/nuke-config.yaml <<< "$REGION_LIST" | sed "/$REGION_MARKER/d" > /tmp/nuke-config.yaml.tmp && mv /tmp/nuke-config.yaml.tmp /tmp/nuke-config.yaml
-
-IS_FINAL_ATTEMPT="false"
 
 # Disable deletion protection for DynamoDB tables. aws-nuke cannot handle this natively.
 # Recovery points for backup vaults also cause issues. Delete them before invoking aws-nuke.
@@ -265,7 +233,7 @@ for REGION in "${REGIONS[@]}"; do
     echo "No DynamoDB tables found in $REGION"
   fi
 
-  # Backup vaults also cause occasional failures. Delete recovery points before starting to nuke.
+  # Delete recovery points.
   for vault in $(aws backup list-backup-vaults --region "$REGION" --query 'BackupVaultList[].BackupVaultName' --output text); do
     echo "Cleaning vault: $vault"
 
@@ -284,27 +252,30 @@ for REGION in "${REGIONS[@]}"; do
   done
 done
 
+# Generate the aws-nuke configuration file from the template by replacing all placeholders.
+sed "s/__ACCOUNT_ID__/${ACCOUNT_ID}/g" /root/config.yaml.template > /tmp/nuke.yaml
+
+# Convert the account list into the required blocklist format
+BLOCKLIST=$(printf "  - %s\n" $(echo "$ACCOUNT_BLOCKLIST" | tr ',' ' '))
+
+# Use a temporary marker to avoid escaping issues
+MARKER="__BLOCKLISTED_ACCOUNTS__"
+
+# Replace the marker in the config template with the blocklist
+sed "/$MARKER/r /dev/stdin" /tmp/nuke.yaml <<< "$BLOCKLIST" | sed "/$MARKER/d" > /tmp/nuke-config.yaml
+
+# Inject regions into the config from the REGIONS env var
+REGION_MARKER="__REGIONS__"
+REGION_LIST=$(printf "  - %s\n" "${REGIONS[@]}")
+echo "Regions: $REGION_LIST"
+sed "/$REGION_MARKER/r /dev/stdin" /tmp/nuke-config.yaml <<< "$REGION_LIST" | sed "/$REGION_MARKER/d" > /tmp/nuke-config.yaml.tmp && mv /tmp/nuke-config.yaml.tmp /tmp/nuke-config.yaml
+
 # Restore the ECS execution role credentials to allow aws-nuke assume the cross-account role.
 # This way it can refresh the credentials whenever needed.
 restore_execution_role
 
-# Exclude Cloudtrail from the nuke operation as it usually takes a long time to delete the logs and
-# the data is not sensitive.
-# AWS Backup recovery points may cause failures in certain cases.
-# For example, EFS default backup policy doesn't allow administrators to delete recovery points.
-# We retry with excluding the Backup resources in the third retry attempt.
-# If this final attempt fails, we exit with an error.
-EXCLUDE_LIST="CloudTrail"
-
-if [ "$IS_FINAL_ATTEMPT" = "true" ]; then
-  echo "Final attempt detected - excluding additional resources"
-  EXCLUDE_LIST="$EXCLUDE_LIST,ACMCertificate,BackupVault,BackupPlan,BackupRecoveryPoint"
-fi
-
-echo "Using exclude list: $EXCLUDE_LIST"
-
 # Run aws-nuke with the generated configuration
-/usr/local/bin/aws-nuke nuke -c /tmp/nuke-config.yaml --no-prompt --no-alias-check --no-dry-run --exclude $EXCLUDE_LIST --assume-role-arn $ROLE_ARN --assume-role-session-name aws-nuke
+/usr/local/bin/aws-nuke nuke -c /tmp/nuke-config.yaml --no-prompt --no-alias-check --no-dry-run --assume-role-arn $ROLE_ARN --assume-role-session-name aws-nuke
 nuke_result=$?
 
 if [ $nuke_result -eq 0 ]; then

@@ -28,12 +28,12 @@ The solution consists of several key components working together:
 
 4. **IAM Roles and Policies**
    - `AccountCleanupExecutionRole`: Step Functions execution role
-   - `FargateTaskRole`: ECS task execution role with cross-account permissions
+   - `NukeEcsTaskRole`: ECS task execution role with cross-account permissions
    - Cross-account role assumption for target account access
 
 ### Security Features
 
-- **Protected Accounts**: A list of accounts that should never be nuked. This feature can be configured using the SSM parameter (`/aws-nuke/blocklist`).
+- **Protected Accounts**: A list of accounts that should never be nuked. This feature can be configured using the SSM parameter (`/autonuke/blocklist`).
 - **Cross-Account Role Assumption**: Uses organization-based trust policies
 - **Resource Filtering**: Comprehensive filters to protect critical AWS services
 - **Network Isolation**: ECS tasks run in private subnets with restricted security groups
@@ -72,11 +72,12 @@ The solution targets 30+ AWS resource types including:
 
 The infrastructure is deployed using CloudFormation with the following parameters:
 
-- `ECRRepositoryName`: Name of the ECR repository (default: aws-nuke)
-- `VpcId`: VPC ID for the ECS cluster
-- `VpcSubnetId`: Subnet ID for ECS tasks
-- `OrgId`: AWS Organization ID for cross-account access
-- `AccountBlocklist`: Comma-delimited list of protected account IDs that cannot be nuked
+- `AwsNukeClusterName`: Name of the ECS cluster (default: aws-nuke-cluster)
+- `ECRRepositoryName`: Name of the ECR repository (required)
+- `VpcId`: VPC ID for the ECS cluster (required)
+- `VpcSubnetId`: Subnet ID for ECS tasks (required)
+- `OrgId`: AWS Organization ID for cross-account access (required)
+- `AccountBlocklist`: Comma-delimited list of protected account IDs that cannot be nuked (required)
 - `MaxRetries`: Maximum retry attempts (default: 3)
 - `NukeExecutionRoleName`: Role name for aws-nuke execution (default: NukeExecutionRole)
 - `AwsRegions`: Comma-delimited list of AWS regions to process (default: eu-north-1,eu-west-1)
@@ -123,19 +124,19 @@ docker buildx build --provenance=false --platform linux/arm64,linux/amd64 -t <re
 Deploy the CloudFormation stack:
 ```bash
 aws cloudformation create-stack \
-  --stack-name ep-account-nuke-stack \
-  --template-body file://cloudformation/nuke-state-machine.yaml \
-  --parameters file://cloudformation/parameters/values-nuke-sm.json \
+  --stack-name autonuke-stack \
+  --template-body file://cloudformation/auto-nuke.yaml \
+  --parameters file://cloudformation/parameters/values-autonuke.json \
   --capabilities CAPABILITY_NAMED_IAM \
   --profile <target-aws-account-profile>
 ```
 
 ### Step 3: Configure Protected Accounts
 
-Set up the protected accounts list in SSM Parameter Store:
+The CloudFormation stack automatically creates the SSM parameter with the accounts specified in `AccountBlocklist`. You can update it later via AWS CLI:
 ```bash
 aws ssm put-parameter \
-  --name "/aws-nuke/protected-accounts" \
+  --name "/autonuke/blocklist" \
   --value "123456789012,234567890123,345678901234" \
   --type "String" \
   --overwrite
@@ -164,7 +165,7 @@ The state machine expects the following input:
 ### Monitoring and Logging
 
 - **Step Functions**: Monitor execution status in the AWS Console
-- **CloudWatch Logs**: Container logs are available in `/ecs/aws-nuke` log group
+- **CloudWatch Logs**: Container logs are available in `/ecs/autonuke` log group
 - **ECS Console**: Monitor task execution and resource usage
 
 ### Retry Logic
@@ -205,7 +206,7 @@ The state machine includes intelligent retry logic:
 
 ### Log Analysis
 
-Check CloudWatch logs at `/ecs/aws-nuke` for detailed execution information:
+Check CloudWatch logs at `/ecs/autonuke` for detailed execution information:
 - Role assumption status
 - Resource discovery and deletion progress
 - Error messages and stack traces
@@ -218,3 +219,8 @@ Check CloudWatch logs at `/ecs/aws-nuke` for detailed execution information:
 - Sensitive resources are protected by comprehensive filters
 - Container runs in isolated network environment
 - Credentials are automatically refreshed to prevent expiration
+
+## Architecture
+
+A blog post about architecture and design considerations:
+https://floccus.se/blog/autonuke
