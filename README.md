@@ -2,75 +2,27 @@
 
 This repository contains infrastructure and automation for safely cleaning up AWS accounts using aws-nuke. The solution uses AWS Step Functions, ECS Fargate, and a containerized aws-nuke tool to systematically remove resources from target accounts while protecting critical infrastructure.
 
-## Architecture Overview
+## Overview
 
-The solution consists of several key components working together:
+AutoNuke provides a production-ready solution for automating AWS account cleanups with:
+- **Multi-layer protection**: Protected accounts list, organization boundaries, and resource filtering
+- **Intelligent retry logic**: Automatic resource scaling on out-of-memory errors
+- **Comprehensive resource coverage**: 30+ AWS resource types including EC2, S3, RDS, Lambda, VPCs, and more
+- **Pre-cleanup optimizations**: Efficient S3 bucket deletion, DynamoDB protection removal, and backup vault cleanup
 
-### Core Components
+## Prerequisites
 
-1. **AWS Step Functions State Machine** (`AccountCleanupStateMachine`)
-   - Orchestrates the entire cleanup process
-   - Handles retry logic with configurable maximum attempts
-   - Manages error handling and failure scenarios
-   - Provides centralized logging and monitoring
-
-2. **ECS Fargate Task**
-   - Runs the containerized aws-nuke tool
-   - Executes in a secure, isolated environment
-   - Supports both ARM64 and AMD64 architectures
-   - Configured with appropriate CPU (256) and memory (512 MB)
-
-3. **Containerized aws-nuke**
-   - Alpine Linux-based container with aws-nuke tool
-   - Dynamically fetches the latest aws-nuke version during build
-   - Includes custom cleanup scripts for S3 buckets and other resources
-   - Pre-configured with comprehensive resource filters
-
-4. **IAM Roles and Policies**
-   - `AccountCleanupExecutionRole`: Step Functions execution role
-   - `NukeEcsTaskRole`: ECS task execution role with cross-account permissions
-   - Cross-account role assumption for target account access
-
-### Security Features
-
-- **Protected Accounts**: A list of accounts that should never be nuked. This feature can be configured using the SSM parameter (`/autonuke/blocklist`).
-- **Cross-Account Role Assumption**: Uses organization-based trust policies
-- **Resource Filtering**: Comprehensive filters to protect critical AWS services
-- **Network Isolation**: ECS tasks run in private subnets with restricted security groups
-
-## Resource Cleanup Strategy
-
-The solution handles different resource types with specialized approaches:
-
-### S3 Buckets
-- Custom script handles S3 bucket deletion efficiently
-- Batch operations for object version deletion
-- Concurrent processing with configurable job limits
-- Automatic exclusion of log buckets (`*-logs-*`, `accesslogs`, `elasticbeanstalk-*`)
-
-### DynamoDB Tables
-- Automatically disables deletion protection before cleanup
-- Processes multiple regions concurrently
-
-### AWS Backup Resources
-- Pre-cleans backup vaults and recovery points
-- Excludes backup resources in final retry attempts
-
-### Comprehensive Resource Coverage
-The solution targets 30+ AWS resource types including:
-- Compute: EC2 instances, volumes, snapshots, AMIs, Lambda functions
-- Storage: EFS, FSx, S3 buckets, EBS volumes
-- Databases: RDS instances/clusters, DynamoDB tables, Redshift clusters
-- Networking: VPCs, subnets, security groups, Elastic IPs
-- Monitoring: CloudWatch logs, metrics, Config rules
-- Containers: ECR repositories, ECS clusters, EKS clusters
-- And many more...
+- AWS Organization with multiple accounts
+- Organization ID for restricting cross-account access
+- Designated "management" or "tools" account to host the autonuke infrastructure
+- Administrator-level permissions in the management account
+- Existing VPC with at least one subnet that has internet access
+- AWS CLI configured with appropriate credentials
+- Docker with buildx support for multi-architecture builds
 
 ## Configuration
 
 ### CloudFormation Parameters
-
-The infrastructure is deployed using CloudFormation with the following parameters:
 
 - `AwsNukeClusterName`: Name of the ECS cluster (default: aws-nuke-cluster)
 - `ECRRepositoryName`: Name of the ECR repository (required)
@@ -83,45 +35,14 @@ The infrastructure is deployed using CloudFormation with the following parameter
 - `AwsRegions`: Comma-delimited list of AWS regions to process (default: eu-north-1,eu-west-1)
 - `NukeMaxJobs`: Maximum number of concurrent S3 deletion jobs (default: 12)
 - `NukeRefreshThreshold`: Refresh credentials when less than this many seconds remaining (default: 300)
-
-### aws-nuke Configuration
-
-The container includes a comprehensive configuration template (`config.yaml.template`) with:
-
-- **Presets**: Common, SSO, Control Tower, and custom filters
-- **Resource Types**: 30+ AWS resource types for cleanup
-- **Regions**: Dynamically configured via the `AwsRegions` CloudFormation parameter and passed as an environment variable to the container
-- **Protection Rules**: Excludes critical AWS services and infrastructure
-
-The regions are automatically populated in the aws-nuke configuration at runtime based on the `REGIONS` environment variable, which is set from the CloudFormation parameter.
+- `ExcludeBucketPrefixes`: Optional - Comma-delimited list of S3 bucket name prefixes to exclude from deletion. If not provided or empty, all buckets will be deleted.
 
 ## Deployment Instructions
 
-### Prerequisites
+### Step 1: Deploy Infrastructure
 
-1. AWS CLI configured with appropriate permissions
-2. Docker installed for container building
-3. Access to the target AWS account and ECR registry
+Deploy the CloudFormation stack (this creates the ECR repository, ECS cluster, task definition, IAM roles, Step Functions state machine, and SSM parameter):
 
-### Step 1: Build and Push Container
-
-```bash
-cd containers/awsnuke
-```
-
-Log in to the ECR registry:
-```bash
-aws ecr get-login-password --region eu-west-1 --profile <ECR-account> | docker login --username AWS --password-stdin <registry-url>
-```
-
-Build and push the container for production:
-```bash
-docker buildx build --provenance=false --platform linux/arm64,linux/amd64 -t <registry-url>/aws-nuke:latest . --push
-```
-
-### Step 2: Deploy Infrastructure
-
-Deploy the CloudFormation stack:
 ```bash
 aws cloudformation create-stack \
   --stack-name autonuke-stack \
@@ -131,9 +52,41 @@ aws cloudformation create-stack \
   --profile <target-aws-account-profile>
 ```
 
+Wait for the stack to complete. You can check the status with:
+```bash
+aws cloudformation describe-stacks --stack-name autonuke-stack --query 'Stacks[0].StackStatus'
+```
+
+Once the stack is created, get the ECR repository URI from the stack outputs:
+```bash
+aws cloudformation describe-stacks \
+  --stack-name autonuke-stack \
+  --query 'Stacks[0].Outputs[?OutputKey==`ECRRepository`].OutputValue' \
+  --output text
+```
+
+### Step 2: Build and Push Container
+
+```bash
+cd containers/awsnuke
+```
+
+Log in to the ECR registry (replace `<account-id>` and `<region>` with your values):
+```bash
+aws ecr get-login-password --region <region> --profile <ECR-account> | docker login --username AWS --password-stdin <account-id>.dkr.ecr.<region>.amazonaws.com
+```
+
+Build and push the container for production (replace `<account-id>`, `<region>`, and `<repository-name>` with your values):
+```bash
+docker buildx build --provenance=false --platform linux/arm64,linux/amd64 \
+  -t <account-id>.dkr.ecr.<region>.amazonaws.com/<repository-name>:latest \
+  . --push
+```
+
 ### Step 3: Configure Protected Accounts
 
 The CloudFormation stack automatically creates the SSM parameter with the accounts specified in `AccountBlocklist`. You can update it later via AWS CLI:
+
 ```bash
 aws ssm put-parameter \
   --name "/autonuke/blocklist" \
@@ -142,16 +95,63 @@ aws ssm put-parameter \
   --overwrite
 ```
 
+**Best Practice**: Include your organization management account, shared services account, production accounts, and the account hosting autonuke infrastructure.
+
+### Step 4: Deploy the Execution Role in Target Accounts
+
+The aws-nuke container assumes the execution role in the target account for cleanup operations. Deploy this stack in **each account you want to clean**:
+
+```bash
+aws cloudformation create-stack \
+  --stack-name auto-nuke-role \
+  --template-body file://cloudformation/nuke-role.yaml \
+  --parameters ParameterKey=AutoNukeHostAccount,ParameterValue=<management-account-id> \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --profile <target-account-profile>
+```
+
+For multiple accounts, use StackSets for easier deployment:
+
+```bash
+aws cloudformation create-stack-set \
+  --stack-set-name autonuke-execution-role \
+  --template-body file://cloudformation/nuke-role.yaml \
+  --parameters ParameterKey=AutoNukeHostAccount,ParameterValue=<management-account-id> \
+  --capabilities CAPABILITY_NAMED_IAM
+
+aws cloudformation create-stack-instances \
+  --stack-set-name autonuke-execution-role \
+  --accounts 123456789012 234567890123 345678901234 \
+  --regions us-east-1
+```
+
 ## Usage
 
-### Triggering the State Machine
+### Manual Execution
 
-The state machine can be triggered in several ways:
+Execute via AWS CLI:
+```bash
+aws stepfunctions start-execution \
+  --state-machine-arn arn:aws:states:<region>:<account>:stateMachine:AccountCleanupStateMachine \
+  --input '{"account_id": "123456789012"}'
+```
 
-1. **AWS Console**: Navigate to Step Functions and execute the `AccountCleanupStateMachine`
-2. **AWS CLI**: Use the `start-execution` command
-3. **AWS Service Catalog**: Create a product that triggers the state machine
-4. **API Gateway**: Create an API endpoint that triggers the state machine
+Or via AWS Console: Navigate to Step Functions and execute the `AccountCleanupStateMachine`
+
+### Scheduled Execution
+
+For weekly cleanup of sandbox accounts, create an EventBridge scheduled rule:
+
+```bash
+aws events put-rule \
+  --name WeeklySandboxCleanup \
+  --schedule-expression "cron(0 2 ? * SUN *)" \
+  --state ENABLED
+
+aws events put-targets \
+  --rule WeeklySandboxCleanup \
+  --targets "Id"="1","Arn"="arn:aws:states:<region>:<account>:stateMachine:AccountCleanupStateMachine","RoleArn"="arn:aws:iam::<account>:role/EventBridgeStepFunctionsRole","Input"="{\"account_id\": \"123456789012\"}"
+```
 
 ### Input Format
 
@@ -162,65 +162,41 @@ The state machine expects the following input:
 }
 ```
 
-### Monitoring and Logging
+## Monitoring
 
-- **Step Functions**: Monitor execution status in the AWS Console
-- **CloudWatch Logs**: Container logs are available in `/ecs/autonuke` log group
-- **ECS Console**: Monitor task execution and resource usage
+**CloudWatch Logs:**
+- **ECS Task Logs**: `/ecs/autonuke` log group
+- **Step Functions Logs**: `/aws/vendedlogs/states/AccountCleanupStateMachine/*`
 
-### Retry Logic
-
-The state machine includes intelligent retry logic:
-- Configurable maximum retry attempts (default: 3)
-- Exponential backoff between retries
-- Final attempt excludes problematic resources (Backup services)
-- Comprehensive error handling and reporting
-
-## Safety Features
-
-### Account Protection
-- Protected accounts list prevents accidental cleanup of critical accounts
-- Organization-based role assumption ensures proper access control
-- Comprehensive resource filters protect AWS-managed services
-
-### Resource Filtering
-- **Control Tower**: Excludes all Control Tower managed resources
-- **SSO**: Protects AWS SSO related resources
-- **Common**: Excludes standard AWS service roles and resources
-- **Custom**: Additional filters for specific organizational needs
-
-### Error Handling
-- Graceful handling of resource deletion failures
-- Detailed logging for troubleshooting
-- Automatic credential refresh during long-running operations
-- Timeout protection (10-hour maximum execution time)
+**Key log patterns to monitor:**
+- `"Account .* is protected"` - Protected account check triggered
+- `"Failed to assume role"` - IAM permission issues
+- `"exit code: 137"` - Out of memory error (triggers automatic scaling)
+- `"aws-nuke ran successfully"` - Successful cleanup
 
 ## Troubleshooting
 
-### Common Issues
+| Issue | Symptom | Solution |
+|-------|---------|----------|
+| **Protected account rejection** | Execution fails immediately with "protected account" message | Intended behavior. Reconfigure /autonuke/blocklist parameter as needed |
+| **Role assumption failure** | "Failed to assume role" error | Verify NukeExecutionRole is deployed in target account and trust policy includes management account |
+| **Container out of memory** | Exit code 137 | State machine automatically doubles CPU/memory and retries |
+| **Partial cleanup** | Some resources remain | Check aws-nuke config—resource type may not be in includes list |
 
-1. **Permission Errors**: Ensure the execution role has proper cross-account permissions
-2. **S3 Bucket Deletion**: Check for bucket policies or MFA requirements
-3. **DynamoDB Protection**: Verify deletion protection is properly disabled
-4. **Backup Resources**: Check if backup vaults have recovery points
+## Security
 
-### Log Analysis
+The `NukeExecutionRole` deployed in target accounts uses **AdministratorAccess** managed policy. This is a deliberate design choice because aws-nuke needs broad permissions to enumerate and delete resources across all AWS services.
 
-Check CloudWatch logs at `/ecs/autonuke` for detailed execution information:
-- Role assumption status
-- Resource discovery and deletion progress
-- Error messages and stack traces
-- Performance metrics
+**Security mitigations:**
+- **Organization boundary enforcement**: The trust policy restricts role assumption to principals within your AWS Organization only
+- **Deployment scope**: The role is only deployed in accounts that should be targeted by autonuke (not in production or protected accounts)
+- **Single-account scope**: The role can only be assumed from the designated management account
+- **ECS task role limitation**: Only the ECS task role in the management account can assume this role, not individual users
+- **Protected accounts list**: Critical accounts are excluded from cleanup eligibility entirely
+- **Audit trail**: All role assumptions and API calls are logged in CloudTrail for security monitoring
 
-## Security Considerations
+## Architecture & Design
 
-- All operations are logged and auditable
-- Cross-account access is limited to organization members
-- Sensitive resources are protected by comprehensive filters
-- Container runs in isolated network environment
-- Credentials are automatically refreshed to prevent expiration
+For detailed architecture information, design considerations, security best practices, cost analysis, and advanced configuration options, see the blog post:
 
-## Architecture
-
-A blog post about architecture and design considerations:
-https://floccus.se/blog/autonuke
+**https://floccus.se/blog/autonuke**

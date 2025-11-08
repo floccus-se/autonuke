@@ -40,6 +40,9 @@ Parameters:
     Type: CommaDelimitedList
     Default: "eu-north-1,eu-west-1"
     Description: "Comma-delimited list of AWS regions to process during cleanup"
+  ExcludeBucketPrefixes:
+    Type: String
+    Description: "Optional: Comma-delimited list of S3 bucket name prefixes to exclude from deletion. If not provided or empty, all buckets will be deleted."
 
 Resources:
   AccountBlocklistParameter:
@@ -170,6 +173,8 @@ Resources:
               Value: !Ref NukeRefreshThreshold
             - Name: REGIONS
               Value: !Join [',', !Ref AwsRegions]
+            - Name: EXCLUDE_BUCKET_PREFIXES
+              Value: !Ref ExcludeBucketPrefixes
           LogConfiguration:
             LogDriver: awslogs
             Options:

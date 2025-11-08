@@ -8,6 +8,16 @@ export AWS_CLI_AUTO_PROMPT=off
 MAX_JOBS=${MAX_JOBS:-12}
 REFRESH_THRESHOLD=${REFRESH_THRESHOLD:-300}
 
+# Parse EXCLUDE_BUCKET_PREFIXES from comma-delimited environment variable
+# If not provided or empty, all buckets will be deleted (no exclusions)
+if [ -z "$EXCLUDE_BUCKET_PREFIXES" ]; then
+  EXCLUDE_PREFIXES=()
+  echo "No bucket exclusions configured - all buckets will be deleted"
+else
+  IFS=',' read -ra EXCLUDE_PREFIXES <<< "$EXCLUDE_BUCKET_PREFIXES"
+  echo "Excluding buckets with prefixes: ${EXCLUDE_PREFIXES[*]}"
+fi
+
 # Check if REGIONS is provided
 if [ -z "$REGIONS" ]; then
   echo "Error: REGIONS environment variable is not set."
@@ -199,7 +209,16 @@ assume_role
 while read -r bucket; do
   refresh_credentials_if_needed
 
-  if [[ $bucket =~ -logs- || $bucket =~ accesslogs || $bucket =~ access-logs   || $bucket =~ elasticbeanstalk- ]]; then
+  # Check if bucket matches any excluded prefix
+  skip_bucket=false
+  for prefix in "${EXCLUDE_PREFIXES[@]}"; do
+    if [[ $bucket =~ $prefix ]]; then
+      skip_bucket=true
+      break
+    fi
+  done
+
+  if [ "$skip_bucket" = true ]; then
     echo "Skip bucket: $bucket"
   else
       delete_bucket "$bucket" &
